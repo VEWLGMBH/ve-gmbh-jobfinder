@@ -4,7 +4,11 @@ import io
 import time
 import re
 import requests
+import urllib3
 from flask import Flask, request, render_template_string, send_file
+
+# отключаем предупреждения об отключенной SSL-проверке
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
 
@@ -22,7 +26,8 @@ HEADERS = {
 
 # Ограничения, чтобы не перегружать API и не вылетать по тайм-ауту Render
 MAX_PAGES = 30          # максимум страниц по одному ключевому слову
-MAX_DETAILS = 250       # максимум вакансий, для которых тянем детали (email)
+MAX_DETAILS = 40        # максимум вакансий, для которых тянем детали (email)
+DETAIL_SLEEP = 0.05     # пауза между запросами деталей, сек
 
 EMAIL_RX = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
 DATE_RX = re.compile(r"\d{4}-\d{2}-\d{2}")
@@ -57,6 +62,7 @@ def parse_jobdetail(refnr: str):
     """
     Зайти на HTML-страницу вакансии и вытащить email (если есть).
     Обернуто в try/except, чтобы любые ошибки сети не валили всё приложение.
+    SSL-проверку отключаем (verify=False), чтобы избежать проблем с CA на Render.
     """
     if not refnr:
         return {"email": ""}
@@ -66,7 +72,8 @@ def parse_jobdetail(refnr: str):
         r = requests.get(
             url,
             headers={"User-Agent": HEADERS["User-Agent"]},
-            timeout=20,
+            timeout=10,
+            verify=False,  # <-- главное отличие для Render
         )
         if r.status_code != 200:
             return {"email": ""}
@@ -167,7 +174,7 @@ def fetch_jobs(keyword, wo, umkreis, exclude_pav):
             if len(items) < base_params["size"]:
                 break
 
-            time.sleep(0.2)  # небольшой пауза, чтобы не долбить API
+            time.sleep(0.2)  # небольшая пауза, чтобы не долбить API
 
     print("Total raw jobs collected:", len(jobs_raw))
     return jobs_raw
@@ -189,7 +196,7 @@ def enrich_jobs(jobs_raw):
         refnr = it.get("refnr")
         contact = parse_jobdetail(refnr)
         count += 1
-        time.sleep(0.2)
+        time.sleep(DETAIL_SLEEP)
 
         ag = it.get("arbeitgeber") or {}
         arbeitgeber = first_nonempty(
@@ -235,7 +242,7 @@ HTML_TEMPLATE = """
 <html lang="de">
 <head>
   <meta charset="utf-8">
-  <title>Stellensuche</title>
+  <title>Stellensuche (arbeitsagentur.de)</title>
   <link rel="stylesheet"
         href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
 
@@ -359,6 +366,13 @@ HTML_TEMPLATE = """
 # -------------------------------------------------------------------
 # Flask-маршруты
 # -------------------------------------------------------------------
+def safe_int(val, default):
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
 @app.route("/", methods=["GET"])
 def index():
     global LAST_RESULTS
@@ -377,7 +391,7 @@ def index():
 
     kw = request.args.get("kw", "Schweißer")
     wo = request.args.get("wo", "33689 Bielefeld")
-    umkreis = int(request.args.get("umkreis", "25") or 25)
+    umkreis = safe_int(request.args.get("umkreis", "25"), 25)
     exclude_pav = request.args.get("exclude_pav", "1") == "1"
     fname = request.args.get("fname", "jobs_ba.csv")
 
