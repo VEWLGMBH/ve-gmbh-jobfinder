@@ -21,7 +21,7 @@ MAX_PAGES = 50
 EMAIL_RX = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
 DATE_RX = re.compile(r"\d{4}-\d{2}-\d{2}")
 
-LAST_RESULTS = []
+LAST_RESULTS = []  # хранит результаты последнего поиска для экспорта
 
 
 def first_nonempty(*vals):
@@ -62,6 +62,7 @@ def parse_jobdetail(refnr: str):
 
 
 def fetch_jobs(keyword, wo, umkreis, exclude_pav):
+
     base_params = {
         "wo": wo,
         "umkreis": umkreis,
@@ -73,6 +74,7 @@ def fetch_jobs(keyword, wo, umkreis, exclude_pav):
         base_params["zeitarbeit"] = "false"
 
     jobs_raw = {}
+
 
     if isinstance(keyword, str):
         keywords = [k.strip() for k in keyword.split(",") if k.strip()]
@@ -96,7 +98,11 @@ def fetch_jobs(keyword, wo, umkreis, exclude_pav):
 
             for it in items:
                 refnr = it.get("refnr")
-                titel = first_nonempty(it.get("titel"), it.get("stellenbezeichnung"), it.get("beruf"))
+                titel = first_nonempty(
+                    it.get("titel"),
+                    it.get("stellenbezeichnung"),
+                    it.get("beruf"),
+                )
 
                 ag = it.get("arbeitgeber") or {}
                 arbeitgeber = first_nonempty(
@@ -106,18 +112,22 @@ def fetch_jobs(keyword, wo, umkreis, exclude_pav):
                 ao = it.get("arbeitsort") or {}
                 ort = first_nonempty(ao.get("ort") if isinstance(ao, dict) else None)
 
+                # ключ для дедупликации — refnr либо комбинация полей
                 key = first_nonempty(refnr, f"{titel}|{arbeitgeber}|{ort}")
                 if key not in jobs_raw:
                     jobs_raw[key] = it
 
+
             if len(items) < base_params["size"]:
                 break
+
             time.sleep(0.2)
 
     return jobs_raw
 
 
 def enrich_jobs(jobs_raw):
+
     results = []
     for key, it in jobs_raw.items():
         refnr = it.get("refnr")
@@ -133,7 +143,11 @@ def enrich_jobs(jobs_raw):
         arbeitsort = first_nonempty(ao.get("ort") if isinstance(ao, dict) else None)
         plz = ao.get("plz") if isinstance(ao, dict) else ""
 
-        titel = first_nonempty(it.get("titel"), it.get("stellenbezeichnung"), it.get("берuf"))
+        titel = first_nonempty(
+            it.get("titel"),
+            it.get("stellenbezeichnung"),
+            it.get("beruf"),
+        )
         published = pick_date(it)
 
         link = f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{refnr}" if refnr else ""
@@ -152,9 +166,6 @@ def enrich_jobs(jobs_raw):
     return results
 
 
-# -------------------------------------------------------------------
-# HTML TEMPLATE (зелёный дизайн + белые заголовки + логотип справа)
-# -------------------------------------------------------------------
 HTML_TEMPLATE = """
 <!doctype html>
 <html lang="de">
@@ -180,7 +191,6 @@ HTML_TEMPLATE = """
     }
     .table tbody tr:nth-child(odd) { background: #eaf7ea; }
     .table tbody tr:nth-child(even) { background: #ffffff; }
-    /* чтобы дата не переносилась */
     .table td:nth-child(5) {
         white-space: nowrap;
     }
@@ -202,6 +212,7 @@ HTML_TEMPLATE = """
     <div class="col-md-4">
       <label class="form-label">Schlüsselwörter</label>
       <input type="text" name="kw" class="form-control"
+             placeholder="z.B. Schweißer, Gabelstaplerfahrer"
              value="{{ kw }}">
     </div>
 
@@ -286,6 +297,7 @@ def index():
     global LAST_RESULTS
 
     if not request.args:
+        # стартовая страница без результатов
         return render_template_string(
             HTML_TEMPLATE,
             results=None,
