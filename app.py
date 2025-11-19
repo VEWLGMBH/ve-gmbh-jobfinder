@@ -8,6 +8,9 @@ from flask import Flask, request, render_template_string, send_file
 
 app = Flask(__name__)
 
+# -------------------------------------------------------------------
+# Конфиг API Agentur für Arbeit
+# -------------------------------------------------------------------
 API_BASE = "https://rest.arbeitsagentur.de/jobboerse/jobsuche-service/pc/v4"
 SEARCH_URL = f"{API_BASE}/jobs"
 JOBDETAIL_URL = "https://www.arbeitsagentur.de/jobsuche/jobdetail/{refnr}"
@@ -17,14 +20,21 @@ HEADERS = {
     "User-Agent": "JobSearchBot/1.0",
 }
 
-MAX_PAGES = 50
+# Ограничения, чтобы не перегружать API и не вылетать по тайм-ауту Render
+MAX_PAGES = 30          # максимум страниц по одному ключевому слову
+MAX_DETAILS = 250       # максимум вакансий, для которых тянем детали (email)
+
 EMAIL_RX = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
 DATE_RX = re.compile(r"\d{4}-\d{2}-\d{2}")
 
-LAST_RESULTS = []  # хранит результаты последнего поиска для экспорта
+LAST_RESULTS = []  # хранит результаты последнего поиска для экспорта CSV
 
 
+# -------------------------------------------------------------------
+# Вспомогательные функции
+# -------------------------------------------------------------------
 def first_nonempty(*vals):
+    """Вернуть первое непустое значение из списка."""
     for v in vals:
         if isinstance(v, str) and v.strip():
             return v.strip()
@@ -34,6 +44,7 @@ def first_nonempty(*vals):
 
 
 def pick_date(item: dict):
+    """Вытащить дату вида YYYY-MM-DD из любого текстового поля вакансии."""
     for v in item.values():
         if isinstance(v, str):
             m = DATE_RX.search(v)
@@ -43,26 +54,41 @@ def pick_date(item: dict):
 
 
 def parse_jobdetail(refnr: str):
+    """
+    Зайти на HTML-страницу вакансии и вытащить email (если есть).
+    Обернуто в try/except, чтобы любые ошибки сети не валили всё приложение.
+    """
     if not refnr:
         return {"email": ""}
 
     url = JOBDETAIL_URL.format(refnr=refnr)
     try:
-        r = requests.get(url, headers={"User-Agent": HEADERS["User-Agent"]}, timeout=30)
+        r = requests.get(
+            url,
+            headers={"User-Agent": HEADERS["User-Agent"]},
+            timeout=20,
+        )
         if r.status_code != 200:
             return {"email": ""}
+
         html = r.text
-    except Exception:
+        emails = set(EMAIL_RX.findall(html))
+        email = sorted(emails)[0] if emails else ""
+        return {"email": email}
+
+    except Exception as e:
+        # Логируем в stdout для Render, но не падаем
+        print("Error in parse_jobdetail:", e)
         return {"email": ""}
-
-    emails = set(EMAIL_RX.findall(html))
-    email = sorted(emails)[0] if emails else ""
-
-    return {"email": email}
 
 
 def fetch_jobs(keyword, wo, umkreis, exclude_pav):
-
+    """
+    Поиск через API Agentur für Arbeit.
+    Поддержка нескольких ключевых слов через запятую:
+    'Schweißer, Gabelstaplerfahrer' -> два запроса, результаты объединяются.
+    Все ошибки сети перехватываются, чтобы не падать.
+    """
     base_params = {
         "wo": wo,
         "umkreis": umkreis,
@@ -75,23 +101,41 @@ def fetch_jobs(keyword, wo, umkreis, exclude_pav):
 
     jobs_raw = {}
 
-
+    # Разбиваем строку "kw" по запятым
     if isinstance(keyword, str):
         keywords = [k.strip() for k in keyword.split(",") if k.strip()]
     else:
         keywords = keyword
 
     for kw in keywords:
+        print(f"Fetching jobs for keyword: {kw!r}")
         for page in range(1, MAX_PAGES + 1):
             params = base_params.copy()
             params["was"] = kw
             params["page"] = page
 
-            resp = requests.get(SEARCH_URL, headers=HEADERS, params=params, timeout=60)
-            if resp.status_code == 400:
+            try:
+                resp = requests.get(
+                    SEARCH_URL,
+                    headers=HEADERS,
+                    params=params,
+                    timeout=25,
+                )
+            except Exception as e:
+                print("Fetch error:", e)
                 break
 
-            data = resp.json()
+            if resp.status_code == 400:
+                # Обычно означает, что вылезли за предел возможных страниц
+                print("Got 400 from API, stop paging for this keyword.")
+                break
+
+            try:
+                data = resp.json()
+            except Exception as e:
+                print("JSON parse error:", e)
+                break
+
             items = data.get("stellenangebote") or data.get("content") or []
             if not items:
                 break
@@ -117,22 +161,35 @@ def fetch_jobs(keyword, wo, umkreis, exclude_pav):
                 if key not in jobs_raw:
                     jobs_raw[key] = it
 
+            print(f"Fetched {len(items)} items on page {page} for {kw!r}")
 
+            # Если вернулось меньше, чем size — дальше страниц нет
             if len(items) < base_params["size"]:
                 break
 
-            time.sleep(0.2)
+            time.sleep(0.2)  # небольшой пауза, чтобы не долбить API
 
+    print("Total raw jobs collected:", len(jobs_raw))
     return jobs_raw
 
 
 def enrich_jobs(jobs_raw):
-
+    """
+    Вызывает parse_jobdetail для каждой вакансии и собирает финальный список.
+    Ограничиваемся MAX_DETAILS штук, чтобы не уходить в вечный запрос.
+    """
     results = []
+    count = 0
+
     for key, it in jobs_raw.items():
+        if count >= MAX_DETAILS:
+            print(f"Reached MAX_DETAILS={MAX_DETAILS}, stop fetching details.")
+            break
+
         refnr = it.get("refnr")
         contact = parse_jobdetail(refnr)
-        time.sleep(0.25)
+        count += 1
+        time.sleep(0.2)
 
         ag = it.get("arbeitgeber") or {}
         arbeitgeber = first_nonempty(
@@ -150,7 +207,10 @@ def enrich_jobs(jobs_raw):
         )
         published = pick_date(it)
 
-        link = f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{refnr}" if refnr else ""
+        link = (
+            f"https://www.arbeitsagentur.de/jobsuche/jobdetail/{refnr}"
+            if refnr else ""
+        )
 
         results.append({
             "titel": titel or "",
@@ -163,9 +223,13 @@ def enrich_jobs(jobs_raw):
             "email": contact.get("email", ""),
         })
 
+    print("Total enriched jobs:", len(results))
     return results
 
 
+# -------------------------------------------------------------------
+# HTML-шаблон: зелёный дизайн + логотип + таблица результатов
+# -------------------------------------------------------------------
 HTML_TEMPLATE = """
 <!doctype html>
 <html lang="de">
@@ -292,12 +356,15 @@ HTML_TEMPLATE = """
 """
 
 
+# -------------------------------------------------------------------
+# Flask-маршруты
+# -------------------------------------------------------------------
 @app.route("/", methods=["GET"])
 def index():
     global LAST_RESULTS
 
+    # Первый заход — просто форма без результатов
     if not request.args:
-        # стартовая страница без результатов
         return render_template_string(
             HTML_TEMPLATE,
             results=None,
@@ -314,8 +381,12 @@ def index():
     exclude_pav = request.args.get("exclude_pav", "1") == "1"
     fname = request.args.get("fname", "jobs_ba.csv")
 
-    jobs_raw = fetch_jobs(kw, wo, umkreis, exclude_pav)
-    LAST_RESULTS = enrich_jobs(jobs_raw)
+    try:
+        jobs_raw = fetch_jobs(kw, wo, umkreis, exclude_pav)
+        LAST_RESULTS = enrich_jobs(jobs_raw)
+    except Exception as e:
+        print("Fatal error in search:", e)
+        LAST_RESULTS = []
 
     return render_template_string(
         HTML_TEMPLATE,
@@ -341,7 +412,16 @@ def export_csv():
     output = io.StringIO()
     writer = csv.DictWriter(
         output,
-        fieldnames=["titel", "arbeitgeber", "arbeitsort", "plz", "published", "refnr", "link", "email"]
+        fieldnames=[
+            "titel",
+            "arbeitgeber",
+            "arbeitsort",
+            "plz",
+            "published",
+            "refnr",
+            "link",
+            "email",
+        ],
     )
     writer.writeheader()
     writer.writerows(LAST_RESULTS)
