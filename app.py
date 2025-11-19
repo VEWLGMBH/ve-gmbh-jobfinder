@@ -7,7 +7,7 @@ import requests
 import urllib3
 from flask import Flask, request, render_template_string, send_file
 
-# отключаем предупреждения об отключенной SSL-проверке
+# Отключаем предупреждения об отключенной SSL-проверке
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = Flask(__name__)
@@ -61,7 +61,6 @@ def pick_date(item: dict):
 def parse_jobdetail(refnr: str):
     """
     Зайти на HTML-страницу вакансии и вытащить email (если есть).
-    Обернуто в try/except, чтобы любые ошибки сети не валили всё приложение.
     SSL-проверку отключаем (verify=False), чтобы избежать проблем с CA на Render.
     """
     if not refnr:
@@ -73,7 +72,7 @@ def parse_jobdetail(refnr: str):
             url,
             headers={"User-Agent": HEADERS["User-Agent"]},
             timeout=10,
-            verify=False,  # <-- главное отличие для Render
+            verify=False,
         )
         if r.status_code != 200:
             return {"email": ""}
@@ -84,7 +83,6 @@ def parse_jobdetail(refnr: str):
         return {"email": email}
 
     except Exception as e:
-        # Логируем в stdout для Render, но не падаем
         print("Error in parse_jobdetail:", e)
         return {"email": ""}
 
@@ -92,9 +90,7 @@ def parse_jobdetail(refnr: str):
 def fetch_jobs(keyword, wo, umkreis, exclude_pav):
     """
     Поиск через API Agentur für Arbeit.
-    Поддержка нескольких ключевых слов через запятую:
-    'Schweißer, Gabelstaplerfahrer' -> два запроса, результаты объединяются.
-    Все ошибки сети перехватываются, чтобы не падать.
+    Поддержка нескольких ключевых слов через запятую.
     """
     base_params = {
         "wo": wo,
@@ -133,7 +129,6 @@ def fetch_jobs(keyword, wo, umkreis, exclude_pav):
                 break
 
             if resp.status_code == 400:
-                # Обычно означает, что вылезли за предел возможных страниц
                 print("Got 400 from API, stop paging for this keyword.")
                 break
 
@@ -152,6 +147,7 @@ def fetch_jobs(keyword, wo, umkreis, exclude_pav):
                 titel = first_nonempty(
                     it.get("titel"),
                     it.get("stellenbezeichnung"),
+                    it.get("берuf"),
                     it.get("beruf"),
                 )
 
@@ -163,18 +159,16 @@ def fetch_jobs(keyword, wo, umkreis, exclude_pav):
                 ao = it.get("arbeitsort") or {}
                 ort = first_nonempty(ao.get("ort") if isinstance(ao, dict) else None)
 
-                # ключ для дедупликации — refnr либо комбинация полей
                 key = first_nonempty(refnr, f"{titel}|{arbeitgeber}|{ort}")
                 if key not in jobs_raw:
                     jobs_raw[key] = it
 
             print(f"Fetched {len(items)} items on page {page} for {kw!r}")
 
-            # Если вернулось меньше, чем size — дальше страниц нет
             if len(items) < base_params["size"]:
                 break
 
-            time.sleep(0.2)  # небольшая пауза, чтобы не долбить API
+            time.sleep(0.2)
 
     print("Total raw jobs collected:", len(jobs_raw))
     return jobs_raw
@@ -210,6 +204,7 @@ def enrich_jobs(jobs_raw):
         titel = first_nonempty(
             it.get("titel"),
             it.get("stellenbezeichnung"),
+            it.get("берuf"),
             it.get("beruf"),
         )
         published = pick_date(it)
@@ -235,7 +230,7 @@ def enrich_jobs(jobs_raw):
 
 
 # -------------------------------------------------------------------
-# HTML-шаблон: зелёный дизайн + логотип + таблица результатов
+# HTML-шаблон: зелёный дизайн + логотип + сортировка с стрелками
 # -------------------------------------------------------------------
 HTML_TEMPLATE = """
 <!doctype html>
@@ -264,6 +259,16 @@ HTML_TEMPLATE = """
     .table tbody tr:nth-child(even) { background: #ffffff; }
     .table td:nth-child(5) {
         white-space: nowrap;
+    }
+    th.sortable {
+        cursor: pointer;
+        user-select: none;
+        white-space: nowrap;
+    }
+    th.sortable .sort-arrow {
+        font-size: 0.75rem;
+        margin-left: 4px;
+        opacity: 0.7;
     }
   </style>
 </head>
@@ -328,21 +333,28 @@ HTML_TEMPLATE = """
     <h5 class="mb-3">Gefundene Stellen: {{ results|length }}</h5>
 
     <div class="table-responsive">
-      <table class="table table-bordered table-striped">
+      <table class="table table-bordered table-striped job-table">
         <thead>
           <tr>
-            <th>STELLENTITEL</th>
-            <th>ARBEITGEBER</th>
-            <th>ORT</th>
-            <th>PLZ</th>
-            <th>PUBLISHED</th>
-            <th>E-MAIL</th>
+            <th class="sortable" data-sort-key="titel">STELLENTITEL<span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-sort-key="arbeitgeber">ARBEITGEBER<span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-sort-key="arbeitsort">ORT<span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-sort-key="plz">PLZ<span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-sort-key="published">PUBLISHED<span class="sort-arrow">⇅</span></th>
+            <th class="sortable" data-sort-key="email">E-MAIL<span class="sort-arrow">⇅</span></th>
             <th>LINK</th>
           </tr>
         </thead>
         <tbody>
           {% for r in results %}
-          <tr>
+          <tr
+            data-titel="{{ r.titel }}"
+            data-arbeitgeber="{{ r.arbeitgeber }}"
+            data-arbeitsort="{{ r.arbeitsort }}"
+            data-plz="{{ r.plz }}"
+            data-published="{{ r.published }}"
+            data-email="{{ r.email }}"
+          >
             <td>{{ r.titel }}</td>
             <td>{{ r.arbeitgeber }}</td>
             <td>{{ r.arbeitsort }}</td>
@@ -358,6 +370,61 @@ HTML_TEMPLATE = """
   {% endif %}
 
 </div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+    const table = document.querySelector("table.job-table");
+    if (!table) return;
+
+    const headers = table.querySelectorAll("th.sortable");
+    const tbody = table.querySelector("tbody");
+    const directions = {};
+
+    headers.forEach(function (header) {
+        const key = header.dataset.sortKey;
+        directions[key] = 1; // 1 = ASC, -1 = DESC
+
+        header.addEventListener("click", function () {
+            const rows = Array.from(tbody.querySelectorAll("tr"));
+            const dir = directions[key];
+
+            rows.sort(function (a, b) {
+                const aVal = (a.dataset[key] || "").toString();
+                const bVal = (b.dataset[key] || "").toString();
+
+                const aNum = parseFloat(aVal.replace(",", "."));
+                const bNum = parseFloat(bVal.replace(",", "."));
+
+                if (!isNaN(aNum) && !isNaN(bNum)) {
+                    return dir * (aNum - bNum);
+                }
+                return dir * aVal.localeCompare(bVal, "de", {numeric: true, sensitivity: "base"});
+            });
+
+            // Перерисовываем строки
+            rows.forEach(function (row) {
+                tbody.appendChild(row);
+            });
+
+            // Обновляем стрелочки
+            headers.forEach(function (h) {
+                const arrow = h.querySelector(".sort-arrow");
+                if (arrow) {
+                    arrow.textContent = "⇅";
+                }
+            });
+            const arrow = header.querySelector(".sort-arrow");
+            if (arrow) {
+                arrow.textContent = dir === 1 ? "▲" : "▼";
+            }
+
+            // Меняем направление для следующего клика
+            directions[key] = -dir;
+        });
+    });
+});
+</script>
+
 </body>
 </html>
 """
@@ -376,6 +443,9 @@ def safe_int(val, default):
 @app.route("/", methods=["GET"])
 def index():
     global LAST_RESULTS
+
+    # Очищаем результаты при каждом запросе
+    LAST_RESULTS = []
 
     # Первый заход — просто форма без результатов
     if not request.args:
