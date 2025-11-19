@@ -277,10 +277,13 @@ HTML_TEMPLATE = """
 <div class="container py-4">
 
   <div class="d-flex justify-content-between align-items-center mb-4">
-      <h1 class="m-0">Stellensuche (arbeitsagentur.de)</h1>
-      <img src="https://ejzkepf.stripocdn.email/content/guids/CABINET_7fd94653830e80b0e60fc4cb1431872fa2b8115f0f3b7b9f53dd6a446bdc94bb/images/image_0BS.png"
-           class="header-logo"
-           alt="Logo">
+      <h1 class="m-0">Stellensuche</h1>
+      <!-- ЛОГОТИП ТЕПЕРЬ КАК ССЫЛКА НА / ДЛЯ СБРОСА ПОИСКА -->
+      <a href="/" class="text-decoration-none">
+        <img src="https://ejzkepf.stripocdn.email/content/guids/CABINET_7fd94653830e80b0e60fc4cb1431872fa2b8115f0f3b7b9f53dd6a446bdc94bb/images/image_0BS.png"
+             class="header-logo"
+             alt="Logo">
+      </a>
   </div>
 
   <form class="row g-3 mb-4" method="get" action="/">
