@@ -235,7 +235,7 @@ HTML_TEMPLATE = """
 <html lang="de">
 <head>
   <meta charset="utf-8">
-  <title>Stellensuche (arbeitsagentur.de)</title>
+  <title>Stellensuche</title>
   <link rel="stylesheet"
         href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
 
